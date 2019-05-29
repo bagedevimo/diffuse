@@ -1,0 +1,7 @@
+[package]
+name = "diffuse-server"
+version = "0.1.0"
+authors = ["Ben Anderson <benanderson@acidic.co.nz>"]
+edition = "2018"
+
+[dependencies]
