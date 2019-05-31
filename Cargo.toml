@@ -1,7 +1,9 @@
 [package]
-name = "diffuse-server"
+name = "diffuse"
 version = "0.1.0"
 authors = ["Ben Anderson <benanderson@acidic.co.nz>"]
 edition = "2018"
 
 [dependencies]
+hex = "0.3.2"
+flate2 = { version = "1.0" }
