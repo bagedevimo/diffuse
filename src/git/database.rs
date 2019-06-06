@@ -1,6 +1,7 @@
 use crypto::digest::Digest;
 use crypto::sha1::Sha1;
 use std::collections::HashMap;
+use std::io::Write;
 
 pub struct Database {
     pub entries: HashMap<ObjectID, Record>,
@@ -133,5 +134,17 @@ pub fn get_object_id(record: &Record) -> String {
 
     let mut hasher = Sha1::new();
     hasher.input(&hash_data);
+
+    // let mut f = std::fs::File::open("dumped_object").unwrap();
+    // f.write(&hash_data);
+
+    if size == 377 {
+        std::fs::write("dumped_object", &hash_data);
+        eprintln!(
+            "{} is \n{:?}\n\n",
+            hasher.result_str(),
+            hex::encode(hash_data)
+        );
+    }
     hasher.result_str()
 }

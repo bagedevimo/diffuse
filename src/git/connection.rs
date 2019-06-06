@@ -199,9 +199,9 @@ fn parse_pack_object_record(
     let record_type = (byte >> 4) & 0x7;
 
     let record: crate::git::database::Record = match record_type {
-        RECORD_TYPE_COMMIT => crate::git::record::parse_commit(inflate_record_data(reader)),
-        RECORD_TYPE_TREE => crate::git::record::parse_tree(inflate_record_data(reader)),
-        RECORD_TYPE_BLOB => crate::git::record::parse_blob(inflate_record_data(reader)),
+        RECORD_TYPE_COMMIT => crate::git::record::parse_commit(inflate_record_data(reader).0),
+        RECORD_TYPE_TREE => crate::git::record::parse_tree(inflate_record_data(reader).0),
+        RECORD_TYPE_BLOB => crate::git::record::parse_blob(inflate_record_data(reader).0),
         RECORD_TYPE_OFS_DELTA => {
             // let (byte, value) = crate::git::connection::read_variable_length_int(reader);
             // eprintln!("byte: {:?}, value: {:?}", byte, value);
@@ -235,10 +235,7 @@ fn inflate_xdelta_record<T: Read>(mut reader: &mut T, database: &mut Database) -
     reader.read(&mut oid_bytes);
 
     let source_id = crate::git::database::ObjectID::from_oid_bytes(oid_bytes);
-    let source_object = match database.fetch(&source_id) {
-        Some(o) => o,
-        None => panic!("Can't inflate object without source ({})", source_id),
-    };
+    let source_object = database.fetch(&source_id);
 
     // let (byte, value) = crate::git::connection::read_variable_length_int(reader);
     // eprintln!("byte: {:?}, value: {:?}", byte, value as i8);
@@ -246,7 +243,7 @@ fn inflate_xdelta_record<T: Read>(mut reader: &mut T, database: &mut Database) -
     // let (byte, value) = crate::git::connection::read_variable_length_int(reader);
     // eprintln!("byte: {:?}, value: {:?}", byte, value as i8);
 
-    let bytes = inflate_record_data(reader);
+    let (bytes, compressed_byte_count) = inflate_record_data(&mut reader);
     let mut secondary_cursor = std::io::Cursor::new(bytes.clone());
 
     let (_, v1) = crate::git::connection::read_variable_length_int(&mut secondary_cursor, 7);
@@ -265,8 +262,9 @@ fn inflate_xdelta_record<T: Read>(mut reader: &mut T, database: &mut Database) -
 
             // let mut buffer = vec![0u8; size as usize];
             // reader.read_exact(&mut buffer).unwrap();
-
-            // eprintln!("Read: {:?}", buffer);
+            if bytes.len() == 20 {
+                eprintln!("Insert: {}", peek[0]);
+            }
 
             out_buffer.push(peek[0]);
         } else {
@@ -275,35 +273,55 @@ fn inflate_xdelta_record<T: Read>(mut reader: &mut T, database: &mut Database) -
             let offset = value & 0xffffffff;
             let size = value >> 32;
 
+            if bytes.len() == 20 {
+                eprintln!("Copy: {} -> {}", offset, offset + size);
+            }
+
             let actual_size = if size == 0 {
                 crate::git::connection::GIT_MAX_COPY
             } else {
                 size
             };
 
-            let data = match source_object {
-                Record::Commit { data, .. } => data,
-                Record::Tree { data, .. } => data,
-                Record::Blob { data, .. } => data,
+            match source_object {
+                Some(so) => {
+                    let data = match so {
+                        Record::Commit { data, .. } => data,
+                        Record::Tree { data, .. } => data,
+                        Record::Blob { data, .. } => data,
+                    };
+
+                    let mut bytes_to_copy: Vec<u8> = vec![0; size as usize];
+
+                    bytes_to_copy.copy_from_slice(&data[offset as usize..(offset + size) as usize]);
+                    // let bytes_to_copy = data[offset as usize..size as usize];
+
+                    // eprintln!("Copying\n{}\n\n", String::from_utf8_lossy(&bytes_to_copy));
+                    out_buffer.append(&mut bytes_to_copy);
+                }
+                None => {
+                    eprintln!(
+                        "WARNING: Forced to skip XDELTA decompression because we can't find {}",
+                        source_id
+                    );
+                }
             };
-
-            let mut bytes_to_copy: Vec<u8> = vec![0; size as usize];
-
-            bytes_to_copy.copy_from_slice(&data[offset as usize..(offset + size) as usize]);
-            // let bytes_to_copy = data[offset as usize..size as usize];
-
-            // eprintln!("Copying\n{}\n\n", String::from_utf8_lossy(&bytes_to_copy));
-            out_buffer.append(&mut bytes_to_copy);
         }
+    }
+
+    if out_buffer.len() > 300 && out_buffer.len() < 400 {
+        eprintln!("{:?}", out_buffer);
+        eprintln!("=============({})\n{:?}", bytes.len(), bytes);
     }
 
     out_buffer
 }
 
-fn inflate_record_data<T: Read>(reader: &mut T) -> Vec<u8> {
+fn inflate_record_data<T: Read>(reader: &mut T) -> (Vec<u8>, u64) {
     let mut deflater = flate2::Decompress::new(true);
 
     let mut output: Vec<u8> = Vec::with_capacity(65000 as usize);
+    let mut input: Vec<u8> = Vec::new();
 
     loop {
         let mut in_byte: [u8; 1] = [0; 1];
@@ -312,6 +330,8 @@ fn inflate_record_data<T: Read>(reader: &mut T) -> Vec<u8> {
             Ok(_) => {}
             Err(e) => panic!("Unexpected EOF inflating DEFLATE stream: {}", e),
         }
+
+        input.push(in_byte[0]);
 
         let status = deflater.decompress_vec(&in_byte, &mut output, flate2::FlushDecompress::None);
 
@@ -323,5 +343,14 @@ fn inflate_record_data<T: Read>(reader: &mut T) -> Vec<u8> {
         }
     }
 
-    output
+    if deflater.total_out() > 300 && deflater.total_out() < 400 {
+        eprintln!(
+            "Inflate finished, inflated to {} bytes:\n==============\n{:?}\n------------------\n{:?}\n\n",
+            deflater.total_in(),
+            input,
+            output,
+        );
+    }
+
+    (output, deflater.total_in())
 }

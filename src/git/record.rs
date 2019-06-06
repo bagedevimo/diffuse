@@ -49,6 +49,7 @@ pub fn parse_blob(d: Vec<u8>) -> Record {
 }
 
 pub fn parse_ofs_delta(d: Vec<u8>) -> Record {
+    panic!("OFSDelta is not implemented!");
     Record::Blob { data: Vec::from(d) }
 }
 
