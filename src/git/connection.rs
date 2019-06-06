@@ -1,40 +1,61 @@
 use crate::util;
 use std::io::Read;
+use std::io::Seek;
 
-#[derive(Debug)]
+use crate::git::database::get_object_id;
+use crate::git::database::Database;
+use crate::git::database::Record;
+
 pub enum Packet {
     Message { size: usize, data: Vec<u8> },
-    Pack,
+    Pack { records: Vec<Record> },
 }
 
 const PACK_HEADER: [u8; 4] = [b'P', b'A', b'C', b'K'];
-const NIL_HEADER: [u8; 4] = [0; 4];
+const NIL_HEADER: [u8; 4] = [0, 0, 0, 0];
+
+const RECORD_TYPE_COMMIT: u8 = 1;
+const RECORD_TYPE_TREE: u8 = 2;
+const RECORD_TYPE_BLOB: u8 = 3;
+
+const RECORD_TYPE_OFS_DELTA: u8 = 6;
+const RECORD_TYPE_REF_DELTA: u8 = 7;
+
+pub const GIT_MAX_COPY: u64 = 0x10000;
 
 pub struct Connection {
-    stream: Box<dyn std::io::Read>,
+    stream: std::io::Cursor<Vec<u8>>,
+    database: Database,
 }
 
 impl Connection {
-    pub fn new(str: Box<dyn std::io::Read>) -> Connection {
-        Connection { stream: str }
+    pub fn new(str: std::io::Cursor<Vec<u8>>) -> Connection {
+        Connection {
+            stream: str,
+            database: Database::new(),
+        }
     }
 
     pub fn receive_packet(&mut self) -> Result<Packet, ConnectionResult> {
         let mut header: [u8; 4] = [0; 4];
         self.stream.read(&mut header)?;
 
-        eprintln!("Header: {:?}", header);
-
         match header {
-            PACK_HEADER => self.receive_pack(),
-            NIL_HEADER => Err(ConnectionResult::EndOfStream),
+            self::PACK_HEADER => self.receive_pack(),
+            self::NIL_HEADER => Err(ConnectionResult::EndOfStream),
             _ => self.receive_message(header),
         }
     }
 
+    pub fn get_database(&self) -> &Database {
+        &self.database
+    }
+
     fn receive_pack(&mut self) -> Result<Packet, ConnectionResult> {
-        parse_pack(&mut self.stream);
-        Ok(Packet::Pack)
+        parse_pack(&mut self.stream, &mut self.database);
+        Ok(Packet::Pack {
+            records: Vec::new(),
+        })
     }
 
     fn receive_message(&mut self, header: [u8; 4]) -> Result<Packet, ConnectionResult> {
@@ -44,13 +65,17 @@ impl Connection {
 
         let size = util::as_u32_be(&header_bytes_array) as usize;
 
-        if size == 0 {
-            return Err(ConnectionResult::EndOfStream);
-        }
-
         let mut buffer = Vec::new();
-        let mut read_buffer = self.stream.as_mut().take((size) as u64);
-        read_buffer.read_to_end(&mut buffer);
+
+        if size > 0 {
+            let mut read_buffer = self.stream.clone().take((size - 4) as u64);
+            self.stream
+                .seek(std::io::SeekFrom::Current(size as i64 - 4));
+            match read_buffer.read_to_end(&mut buffer) {
+                Ok(_) => {}
+                Err(e) => panic!("Unexpected EOF while reading message: {}", e),
+            }
+        }
 
         Ok(Packet::Message {
             size: size,
@@ -73,7 +98,7 @@ impl std::convert::From<std::io::Error> for ConnectionResult {
 
 // CLEAN UP
 
-fn parse_pack<T: Read>(reader: &mut T) {
+fn parse_pack<T: Read>(reader: &mut T, database: &mut Database) -> Vec<Record> {
     let mut version_bytes: [u8; 4] = [0; 4];
     reader
         .read(&mut version_bytes)
@@ -86,10 +111,11 @@ fn parse_pack<T: Read>(reader: &mut T) {
 
     let pack_object_count = util::as_u32_be(&pack_object_count_bytes);
 
-    let mut pack_objects: Vec<PackObject> = Vec::new();
-    for pack_index in 0..pack_object_count {
-        let pack_object = parse_pack_object_record(reader);
-        pack_objects.push(pack_object);
+    let mut pack_objects: Vec<crate::git::database::Record> = Vec::new();
+    for _pack_index in 0..pack_object_count {
+        let pack_object = parse_pack_object_record(reader, database);
+        pack_objects.push(pack_object.clone());
+        database.insert(pack_object);
     }
 
     let mut trailer_signature: [u8; 20] = [0; 20];
@@ -97,51 +123,47 @@ fn parse_pack<T: Read>(reader: &mut T) {
         .read(&mut trailer_signature)
         .expect("unexpected EOF while reading pack signature");
 
-    let commit_count: usize = pack_objects.iter().filter(|x| x.object_type == 1).count();
-    let tree_count: usize = pack_objects.iter().filter(|x| x.object_type == 2).count();
-    let blob_count: usize = pack_objects.iter().filter(|x| x.object_type == 3).count();
-    eprintln!(
-        "Pack contains {} commits, {} trees and {} blobs",
-        commit_count, tree_count, blob_count
-    );
+    // let commit_count: usize = pack_objects
+    //     .iter()
+    //     .filter(|x| match x {
+    //         crate::git::database::Record::Commit { .. } => true,
+    //         _ => false,
+    //     })
+    //     .count();
+
+    // let tree_count: usize = pack_objects
+    //     .iter()
+    //     .filter(|x| match x {
+    //         crate::git::database::Record::Tree { .. } => true,
+    //         _ => false,
+    //     })
+    //     .count();
+    // let blob_count: usize = pack_objects
+    //     .into_iter()
+    //     .filter(|x| match x {
+    //         crate::git::database::Record::Blob { .. } => true,
+    //         _ => false,
+    //     })
+    //     .count();
+
+    pack_objects
 }
-
-// def read_record_header
-//   byte, size = Numbers::VarIntLE.read(@input, 4)
-//   type = (byte >> 4) & 0x7
-
-//   [type, size]
-// end
-
-// def self.read(input, shift)
-//   first = input.readbyte
-//   value = first & (2 ** shift - 1)
-
-//   byte = first
-
-//   until byte < 0x80
-//     byte   = input.readbyte
-//     value |= (byte & 0x7f) << shift
-//     shift += 7
-//   end
-
-//   [first, value]
-// end
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn read_variable_length_int_test() {
-        let mut raw_data: [u8; 14] = [157, 11, 120, 156, 165, 204, 49, 14, 66, 33, 12, 0, 208, 15];
+        let mut raw_data: [u8; 2] = [210, 35];
         let mut raw_data_slice = &raw_data[..];
 
-        let (byte, value) = crate::git::connection::read_variable_length_int(&mut raw_data_slice);
-        assert_eq!(byte, 157);
-        assert_eq!(value, 189);
+        let (byte, value) =
+            crate::git::connection::read_variable_length_int(&mut raw_data_slice, 7);
+        assert_eq!(byte, 210);
+        assert_eq!(value, 4562);
     }
 }
 
-fn read_byte<T: Read>(reader: &mut T) -> Option<u8> {
+fn read_byte(reader: &mut impl Read) -> Option<u8> {
     let mut byte: [u8; 1] = [0; 1];
 
     match reader.read(&mut byte) {
@@ -150,12 +172,10 @@ fn read_byte<T: Read>(reader: &mut T) -> Option<u8> {
     }
 }
 
-fn read_variable_length_int<T: Read>(reader: &mut T) -> (u8, u32) {
-    let mut shift = 4;
+pub fn read_variable_length_int(reader: &mut impl Read, shift_start: u32) -> (u8, u32) {
+    let mut shift = shift_start;
 
-    // let first: u8 = 0x00;
     let first: u8 = read_byte(reader).unwrap();
-    // input.read(&first).expect();
 
     let mut value: u32 = (first as u32) & (u32::pow(2, shift) - 1);
 
@@ -163,7 +183,7 @@ fn read_variable_length_int<T: Read>(reader: &mut T) -> (u8, u32) {
 
     while byte >= 0x80 {
         byte = read_byte(reader).unwrap();
-        // eprintln!("Byte: {:?}, shift: {:?}, value: {:?}", byte, shift, value);
+
         value |= ((byte & 0x7F) as u32) << shift;
         shift += 7;
     }
@@ -171,96 +191,137 @@ fn read_variable_length_int<T: Read>(reader: &mut T) -> (u8, u32) {
     (first, value)
 }
 
-struct PackObject {
-    object_type: u8,
-    data: Vec<u8>,
-}
-
-fn parse_pack_object_record<T: Read>(reader: &mut T) -> PackObject {
-    let (byte, size) = read_variable_length_int(reader);
+fn parse_pack_object_record(
+    reader: &mut impl Read,
+    database: &mut Database,
+) -> crate::git::database::Record {
+    let (byte, _) = read_variable_length_int(reader, 4);
     let record_type = (byte >> 4) & 0x7;
 
-    // eprintln!("record_type: {:?}, size: {:?}", record_type, size);
+    let record: crate::git::database::Record = match record_type {
+        RECORD_TYPE_COMMIT => crate::git::record::parse_commit(inflate_record_data(reader)),
+        RECORD_TYPE_TREE => crate::git::record::parse_tree(inflate_record_data(reader)),
+        RECORD_TYPE_BLOB => crate::git::record::parse_blob(inflate_record_data(reader)),
+        RECORD_TYPE_OFS_DELTA => {
+            // let (byte, value) = crate::git::connection::read_variable_length_int(reader);
+            // eprintln!("byte: {:?}, value: {:?}", byte, value);
+            // let (byte, value) = crate::git::connection::read_variable_length_int(reader);
+            // eprintln!("byte: {:?}, value: {:?}", byte, value);
+            crate::git::record::parse_ofs_delta(inflate_xdelta_record(reader, database))
+        }
+        RECORD_TYPE_REF_DELTA => {
+            crate::git::record::parse_ref_delta(inflate_xdelta_record(reader, database))
+        }
+        // 6...7 => Record::Unknown {
+        //     data: inflate_xdelta_record(reader, size as u64),
+        // },
+        x => panic!("Unknown record type: {}", x),
+    };
 
-    let data = inflate_record_data(reader, size as u64);
+    // if record_type == RECORD_TYPE_TREE {
+    // eprintln!(
+    //     "Record ({}):\n{:?}\n\n",
+    //     // record.get_name(),
+    //     get_object_id(&record),
+    //     record,
+    // );
+    // }
 
-    PackObject {
-        object_type: record_type,
-        data: data,
-    }
+    record
 }
 
-fn inflate_record_data<T: Read>(reader: &mut T, expected_bytes: u64) -> Vec<u8> {
-    // eprintln!("Trying to deflate record");
-    // eprintln!(
-    //     "Peek: {:?} {:?}",
-    //     read_byte(reader).unwrap(),
-    //     read_byte(reader).unwrap()
-    // );
+fn inflate_xdelta_record<T: Read>(mut reader: &mut T, database: &mut Database) -> Vec<u8> {
+    let mut oid_bytes = [0; 20];
+    reader.read(&mut oid_bytes);
 
-    // reader.seek(SeekFrom::Current(-2));
+    let source_id = crate::git::database::ObjectID::from_oid_bytes(oid_bytes);
+    let source_object = match database.fetch(&source_id) {
+        Some(o) => o,
+        None => panic!("Can't inflate object without source ({})", source_id),
+    };
+
+    // let (byte, value) = crate::git::connection::read_variable_length_int(reader);
+    // eprintln!("byte: {:?}, value: {:?}", byte, value as i8);
+
+    // let (byte, value) = crate::git::connection::read_variable_length_int(reader);
+    // eprintln!("byte: {:?}, value: {:?}", byte, value as i8);
+
+    let bytes = inflate_record_data(reader);
+    let mut secondary_cursor = std::io::Cursor::new(bytes.clone());
+
+    let (_, v1) = crate::git::connection::read_variable_length_int(&mut secondary_cursor, 7);
+    let (_, v2) = crate::git::connection::read_variable_length_int(&mut secondary_cursor, 7);
+
+    let mut out_buffer = Vec::new();
+
+    while secondary_cursor.stream_position().unwrap() < secondary_cursor.stream_len().unwrap() {
+        let mut peek: [u8; 1] = [0; 1];
+        secondary_cursor.read(&mut peek);
+
+        // secondary_cursor.seek(std::io::SeekFrom::Current(-1));
+
+        if peek[0] < 0x80 {
+            // let (_, size) = crate::git::connection::read_variable_length_int(&mut reader, 4);
+
+            // let mut buffer = vec![0u8; size as usize];
+            // reader.read_exact(&mut buffer).unwrap();
+
+            // eprintln!("Read: {:?}", buffer);
+
+            out_buffer.push(peek[0]);
+        } else {
+            let value =
+                crate::git::record::read_packed_int_56le(&mut secondary_cursor, peek[0] as u64);
+            let offset = value & 0xffffffff;
+            let size = value >> 32;
+
+            let actual_size = if size == 0 {
+                crate::git::connection::GIT_MAX_COPY
+            } else {
+                size
+            };
+
+            let data = match source_object {
+                Record::Commit { data, .. } => data,
+                Record::Tree { data, .. } => data,
+                Record::Blob { data, .. } => data,
+            };
+
+            let mut bytes_to_copy: Vec<u8> = vec![0; size as usize];
+
+            bytes_to_copy.copy_from_slice(&data[offset as usize..(offset + size) as usize]);
+            // let bytes_to_copy = data[offset as usize..size as usize];
+
+            // eprintln!("Copying\n{}\n\n", String::from_utf8_lossy(&bytes_to_copy));
+            out_buffer.append(&mut bytes_to_copy);
+        }
+    }
+
+    out_buffer
+}
+
+fn inflate_record_data<T: Read>(reader: &mut T) -> Vec<u8> {
     let mut deflater = flate2::Decompress::new(true);
 
-    let mut output: Vec<u8> = Vec::with_capacity(expected_bytes as usize);
-    // let mut data = Vec::new();
+    let mut output: Vec<u8> = Vec::with_capacity(65000 as usize);
 
     loop {
         let mut in_byte: [u8; 1] = [0; 1];
-        reader.read(&mut in_byte);
 
-        let mut out_bytes: [u8; 16] = [0; 16];
+        match reader.read(&mut in_byte) {
+            Ok(_) => {}
+            Err(e) => panic!("Unexpected EOF inflating DEFLATE stream: {}", e),
+        }
 
         let status = deflater.decompress_vec(&in_byte, &mut output, flate2::FlushDecompress::None);
 
-        // if deflater.total_out() > output.len() as u64 {
-        //     for i in 0..(deflater.total_out() - output.len() as u64) {
-        //         output.push(out_bytes[i as usize]);
-        //     }
-        //     // output.push(*out_byte.first().unwrap());
-        // }
-
-        // eprintln!(
-        //     "in: {:?}, out: {:?}, status: {:?}, total_out: {:?}, expecting: {:?}, \noutput:\n{}\n\n",
-        //     in_byte,
-        //     out_bytes,
-        //     status,
-        //     deflater.total_out(),
-        //     expected_bytes,
-        //     String::from_utf8_lossy(&output.clone()),
-        // );
-
         match status {
-            Ok(inner_status) => {
-                // eprintln!("inner_status: {:?}", inner_status);
-                match inner_status {
-                    flate2::Status::StreamEnd => {
-                        // eprintln!("Stream end?");
-                        break;
-                    }
-                    flate2::Status::Ok => {}
-                    flate2::Status::BufError => panic!("Here"),
-                };
-            }
-            Err(e) => panic!("Error: {:?}, {:?}", e, e.needs_dictionary()),
+            Ok(flate2::Status::StreamEnd) => break,
+            Ok(flate2::Status::Ok) => {}
+            Ok(flate2::Status::BufError) => panic!("Inflate buffer error"),
+            Err(e) => panic!("Error: {:?}", e),
         }
-
-        // if deflater.total_out() == expected_bytes {
-        //     break;
-        // }
     }
 
     output
-
-    // match maybe_byte {
-    //     Some(byte) => {
-    //         println!("Decompressor: {:?}", byte);
-    //         data.push(byte)
-    //     }
-    //     None => break,
-    // };
-    // }
-
-    // deflater.read_to_string(&mut data).unwrap();
-
-    // eprintln!("Decompression:\n{:?}\n\n", data);
 }
