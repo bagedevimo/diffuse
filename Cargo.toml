@@ -8,3 +8,23 @@ edition = "2018"
 hex = "0.3.2"
 flate2 = { version = "1.0" }
 rust-crypto = "0.2.36"
+
+# futures = "0.1"
+futures-preview = { version = "=0.3.0-alpha.16", features = ["async-await", "nightly"] }
+
+tarpc = { version = "0.18", features = ["serde1"] }
+tarpc-lib = "0.6"
+tarpc-bincode-transport = "0.7"
+
+async-bincode = "0.4"
+bincode = "1.1.4"
+
+tokio = "0.1.21"
+tokio-io = "0.1.12"
+tokio-tcp = "0.1.3"
+tokio-executor = "0.1.7"
+tokio-async-await = "0.1.7"
+
+serde = "1.0.92"
+
+clap = "2.0"

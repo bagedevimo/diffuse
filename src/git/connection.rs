@@ -2,7 +2,8 @@ use crate::util;
 use std::io::Read;
 use std::io::Seek;
 
-use crate::git::database::get_object_id;
+use futures::future::Future;
+
 use crate::git::database::Database;
 use crate::git::database::Record;
 
@@ -23,16 +24,16 @@ const RECORD_TYPE_REF_DELTA: u8 = 7;
 
 pub const GIT_MAX_COPY: u64 = 0x10000;
 
-pub struct Connection {
+pub struct Connection<'a> {
     stream: std::io::Cursor<Vec<u8>>,
-    database: Database,
+    database: &'a mut Database<'a>,
 }
 
-impl Connection {
-    pub fn new(str: std::io::Cursor<Vec<u8>>) -> Connection {
+impl<'a> Connection<'a> {
+    pub fn new(str: std::io::Cursor<Vec<u8>>, database: &'a mut Database<'a>) -> Connection<'a> {
         Connection {
             stream: str,
-            database: Database::new(),
+            database: database,
         }
     }
 
@@ -70,7 +71,8 @@ impl Connection {
         if size > 0 {
             let mut read_buffer = self.stream.clone().take((size - 4) as u64);
             self.stream
-                .seek(std::io::SeekFrom::Current(size as i64 - 4));
+                .seek(std::io::SeekFrom::Current(size as i64 - 4))
+                .unwrap();
             match read_buffer.read_to_end(&mut buffer) {
                 Ok(_) => {}
                 Err(e) => panic!("Unexpected EOF while reading message: {}", e),
@@ -115,7 +117,10 @@ fn parse_pack<T: Read>(reader: &mut T, database: &mut Database) -> Vec<Record> {
     for _pack_index in 0..pack_object_count {
         let pack_object = parse_pack_object_record(reader, database);
         pack_objects.push(pack_object.clone());
-        database.insert(pack_object);
+
+        eprintln!("Inserting..");
+        tokio::spawn(database.insert(pack_object));
+        eprintln!("Inserting done");
     }
 
     let mut trailer_signature: [u8; 20] = [0; 20];
@@ -232,7 +237,7 @@ fn parse_pack_object_record(
 
 fn inflate_xdelta_record<T: Read>(mut reader: &mut T, database: &mut Database) -> Vec<u8> {
     let mut oid_bytes = [0; 20];
-    reader.read(&mut oid_bytes);
+    reader.read(&mut oid_bytes).unwrap();
 
     let source_id = crate::git::database::ObjectID::from_oid_bytes(oid_bytes);
     let source_object = database.fetch(&source_id);
@@ -243,17 +248,17 @@ fn inflate_xdelta_record<T: Read>(mut reader: &mut T, database: &mut Database) -
     // let (byte, value) = crate::git::connection::read_variable_length_int(reader);
     // eprintln!("byte: {:?}, value: {:?}", byte, value as i8);
 
-    let (bytes, compressed_byte_count) = inflate_record_data(&mut reader);
+    let (bytes, _) = inflate_record_data(&mut reader);
     let mut secondary_cursor = std::io::Cursor::new(bytes.clone());
 
-    let (_, v1) = crate::git::connection::read_variable_length_int(&mut secondary_cursor, 7);
-    let (_, v2) = crate::git::connection::read_variable_length_int(&mut secondary_cursor, 7);
+    let (_, _v1) = crate::git::connection::read_variable_length_int(&mut secondary_cursor, 7);
+    let (_, _v2) = crate::git::connection::read_variable_length_int(&mut secondary_cursor, 7);
 
     let mut out_buffer = Vec::new();
 
     while secondary_cursor.stream_position().unwrap() < secondary_cursor.stream_len().unwrap() {
         let mut peek: [u8; 1] = [0; 1];
-        secondary_cursor.read(&mut peek);
+        secondary_cursor.read(&mut peek).unwrap();
 
         // secondary_cursor.seek(std::io::SeekFrom::Current(-1));
 
@@ -262,20 +267,16 @@ fn inflate_xdelta_record<T: Read>(mut reader: &mut T, database: &mut Database) -
 
             // let mut buffer = vec![0u8; size as usize];
             // reader.read_exact(&mut buffer).unwrap();
-            if bytes.len() == 20 {
-                eprintln!("Insert: {}", peek[0]);
+            for _ in 0..peek[0] {
+                let mut new_byte: [u8; 1] = [0; 1];
+                secondary_cursor.read(&mut new_byte);
+                out_buffer.push(new_byte[0]);
             }
-
-            out_buffer.push(peek[0]);
         } else {
             let value =
                 crate::git::record::read_packed_int_56le(&mut secondary_cursor, peek[0] as u64);
             let offset = value & 0xffffffff;
             let size = value >> 32;
-
-            if bytes.len() == 20 {
-                eprintln!("Copy: {} -> {}", offset, offset + size);
-            }
 
             let actual_size = if size == 0 {
                 crate::git::connection::GIT_MAX_COPY
@@ -291,9 +292,10 @@ fn inflate_xdelta_record<T: Read>(mut reader: &mut T, database: &mut Database) -
                         Record::Blob { data, .. } => data,
                     };
 
-                    let mut bytes_to_copy: Vec<u8> = vec![0; size as usize];
+                    let mut bytes_to_copy: Vec<u8> = vec![0; actual_size as usize];
 
-                    bytes_to_copy.copy_from_slice(&data[offset as usize..(offset + size) as usize]);
+                    bytes_to_copy
+                        .copy_from_slice(&data[offset as usize..(offset + actual_size) as usize]);
                     // let bytes_to_copy = data[offset as usize..size as usize];
 
                     // eprintln!("Copying\n{}\n\n", String::from_utf8_lossy(&bytes_to_copy));
@@ -307,11 +309,6 @@ fn inflate_xdelta_record<T: Read>(mut reader: &mut T, database: &mut Database) -
                 }
             };
         }
-    }
-
-    if out_buffer.len() > 300 && out_buffer.len() < 400 {
-        eprintln!("{:?}", out_buffer);
-        eprintln!("=============({})\n{:?}", bytes.len(), bytes);
     }
 
     out_buffer
@@ -341,15 +338,6 @@ fn inflate_record_data<T: Read>(reader: &mut T) -> (Vec<u8>, u64) {
             Ok(flate2::Status::BufError) => panic!("Inflate buffer error"),
             Err(e) => panic!("Error: {:?}", e),
         }
-    }
-
-    if deflater.total_out() > 300 && deflater.total_out() < 400 {
-        eprintln!(
-            "Inflate finished, inflated to {} bytes:\n==============\n{:?}\n------------------\n{:?}\n\n",
-            deflater.total_in(),
-            input,
-            output,
-        );
     }
 
     (output, deflater.total_in())

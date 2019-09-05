@@ -1,24 +1,39 @@
+#![feature(async_await)]
+
 use crypto::digest::Digest;
 use crypto::sha1::Sha1;
+use futures::future::join;
+use futures::future::FutureExt;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Write;
+use std::pin::Pin;
+use tarpc::{client, context};
 
-pub struct Database {
+use futures::{compat::Executor01CompatExt, prelude::*};
+
+pub struct Database<'a> {
     pub entries: HashMap<ObjectID, Record>,
+    pub client: &'a mut crate::proto::Client,
 }
 
-impl Database {
-    pub fn new() -> Database {
+impl<'a> Database<'a> {
+    pub fn new(client: &'a mut crate::proto::Client) -> Database<'a> {
         Database {
             entries: HashMap::new(),
+            client: client,
         }
     }
 
-    pub fn insert(&mut self, record: Record) -> Option<ObjectID> {
+    pub async fn insert(&mut self, record: Record) -> Option<ObjectID> {
         let object_id_str = get_object_id(&record);
         let object_id = ObjectID::from_oid_string(object_id_str);
 
-        self.entries.insert(object_id.clone(), record);
+        self.entries.insert(object_id.clone(), record.clone());
+
+        let result = match record {
+            Record::Blob { .. } => self.client.store_blob(context::current(), record).wait(),
+            _ => true,
+        };
 
         Some(object_id)
     }
@@ -63,10 +78,6 @@ impl ObjectID {
             oid_string: string,
         }
     }
-
-    fn string(&self) -> String {
-        self.oid_string.clone()
-    }
 }
 
 impl std::cmp::PartialEq for ObjectID {
@@ -89,7 +100,7 @@ impl std::fmt::Display for ObjectID {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum Record {
     Commit {
         data: Vec<u8>,
@@ -104,7 +115,7 @@ pub enum Record {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct TreeEntry {
     pub mode: Vec<u8>,
     pub name: String,
@@ -139,7 +150,7 @@ pub fn get_object_id(record: &Record) -> String {
     // f.write(&hash_data);
 
     if size == 377 {
-        std::fs::write("dumped_object", &hash_data);
+        std::fs::write("dumped_object", &hash_data).unwrap();
         eprintln!(
             "{} is \n{:?}\n\n",
             hasher.result_str(),
