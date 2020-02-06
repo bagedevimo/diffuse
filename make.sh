@@ -3,12 +3,11 @@
 set -e
 
 cargo build
-sudo cp target/debug/diffuse_recv_pack /Users/git/ben-git/git-receive-pack && sudo chown git /Users/git/ben-git/git-receive-pack
 
 if [ "$1" == "--notrace" ]; then
 	git push local --all
 else
-	GIT_TRACE=2 GIT_CURL_VERBOSE=2 GIT_TRACE_PERFORMANCE=2 GIT_TRACE_PACK_ACCESS=2 GIT_TRACE_PACKET=2 GIT_TRACE_PACKFILE=2 GIT_TRACE_SETUP=2 GIT_TRACE_SHALLOW=2 git push local --all
+	GIT_TRACE=2 GIT_CURL_VERBOSE=2 GIT_TRACE_PERFORMANCE=2 GIT_TRACE_PACK_ACCESS=2 GIT_TRACE_PACKET=2 GIT_TRACE_PACKFILE=2 GIT_TRACE_SETUP=2 GIT_TRACE_SHALLOW=2 git push --receive-pack=./target/debug/diffuse_recv_pack local --all
 fi
 
-sudo head -n 5 /Users/git/out.log
+head -n 10 out.log

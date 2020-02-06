@@ -1,26 +1,15 @@
-#![feature(async_await)]
-
 use crypto::digest::Digest;
 use crypto::sha1::Sha1;
-use futures::future::join;
-use futures::future::FutureExt;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::pin::Pin;
-use tarpc::{client, context};
 
-use futures::{compat::Executor01CompatExt, prelude::*};
-
-pub struct Database<'a> {
+pub struct Database {
     pub entries: HashMap<ObjectID, Record>,
-    pub client: &'a mut crate::proto::Client,
 }
 
-impl<'a> Database<'a> {
-    pub fn new(client: &'a mut crate::proto::Client) -> Database<'a> {
+impl Database {
+    pub fn new() -> Database {
         Database {
             entries: HashMap::new(),
-            client: client,
         }
     }
 
@@ -29,11 +18,6 @@ impl<'a> Database<'a> {
         let object_id = ObjectID::from_oid_string(object_id_str);
 
         self.entries.insert(object_id.clone(), record.clone());
-
-        let result = match record {
-            Record::Blob { .. } => self.client.store_blob(context::current(), record).wait(),
-            _ => true,
-        };
 
         Some(object_id)
     }
@@ -100,7 +84,7 @@ impl std::fmt::Display for ObjectID {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 pub enum Record {
     Commit {
         data: Vec<u8>,
@@ -115,7 +99,7 @@ pub enum Record {
     },
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 pub struct TreeEntry {
     pub mode: Vec<u8>,
     pub name: String,

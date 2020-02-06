@@ -2,8 +2,6 @@ use crate::util;
 use std::io::Read;
 use std::io::Seek;
 
-use futures::future::Future;
-
 use crate::git::database::Database;
 use crate::git::database::Record;
 
@@ -26,11 +24,11 @@ pub const GIT_MAX_COPY: u64 = 0x10000;
 
 pub struct Connection<'a> {
     stream: std::io::Cursor<Vec<u8>>,
-    database: &'a mut Database<'a>,
+    database: &'a mut Database,
 }
 
 impl<'a> Connection<'a> {
-    pub fn new(str: std::io::Cursor<Vec<u8>>, database: &'a mut Database<'a>) -> Connection<'a> {
+    pub fn new(str: std::io::Cursor<Vec<u8>>, database: &mut Database) -> Connection {
         Connection {
             stream: str,
             database: database,
@@ -49,11 +47,11 @@ impl<'a> Connection<'a> {
     }
 
     pub fn get_database(&self) -> &Database {
-        &self.database
+        self.database
     }
 
     fn receive_pack(&mut self) -> Result<Packet, ConnectionResult> {
-        parse_pack(&mut self.stream, &mut self.database);
+        parse_pack(&mut self.stream, self.database);
         Ok(Packet::Pack {
             records: Vec::new(),
         })
@@ -119,7 +117,7 @@ fn parse_pack<T: Read>(reader: &mut T, database: &mut Database) -> Vec<Record> {
         pack_objects.push(pack_object.clone());
 
         eprintln!("Inserting..");
-        tokio::spawn(database.insert(pack_object));
+        database.insert(pack_object);
         eprintln!("Inserting done");
     }
 
