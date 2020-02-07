@@ -116,9 +116,7 @@ fn parse_pack<T: Read>(reader: &mut T, database: &mut Database) -> Vec<Record> {
         let pack_object = parse_pack_object_record(reader, database);
         pack_objects.push(pack_object.clone());
 
-        eprintln!("Inserting..");
         database.insert(pack_object);
-        eprintln!("Inserting done");
     }
 
     let mut trailer_signature: [u8; 20] = [0; 20];

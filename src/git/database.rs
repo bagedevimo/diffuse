@@ -13,7 +13,7 @@ impl Database {
         }
     }
 
-    pub async fn insert(&mut self, record: Record) -> Option<ObjectID> {
+    pub fn insert(&mut self, record: Record) -> Option<ObjectID> {
         let object_id_str = get_object_id(&record);
         let object_id = ObjectID::from_oid_string(object_id_str);
 
